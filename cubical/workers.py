@@ -177,7 +177,9 @@ def setup_parallelism(ncpu, nworker, nthread, force_serial, affinity, io_affinit
                 core += corestep
     return True
 
+
 def run_process_loop(ms, _tile_list, load_model, single_chunk, solver_type, solver_opts, debug_opts):
+
     """
     Runs the main loop. If debugging is set, or single_chunk mode is on, forces serial mode.
     Otherwise selects serial or parallel depending on previous call to setup_parallelism().
@@ -196,6 +198,7 @@ def run_process_loop(ms, _tile_list, load_model, single_chunk, solver_type, solv
     Returns:
         Stats dictionary
     """
+
     # if worker processes are launched, this global is inherited and will be accessed
     # by the I/O worker
     global tile_list
@@ -235,7 +238,7 @@ def _run_multi_process_loop(ms, load_model, solver_type, solver_opts, debug_opts
         # this will be a dict of tile number: future loading that tile
         io_futures = {}
         # schedule I/O job to load tile 0
-        io_futures[0] = io_executor.submit(_io_handler, load=0, save=None)
+        io_futures[0] = io_executor.submit(_io_handler, load=0, save=None, load_model=load_model)
         # all I/O will be done by the I/O thread, so we need to close the MS in the main process
         # and reopen it afterwards
         ms.close()
@@ -255,8 +258,9 @@ def _run_multi_process_loop(ms, load_model, solver_type, solver_opts, debug_opts
             # immediately schedule I/O job to save previous/load next tile
             load_next = itile + 1 if itile < len(tile_list) - 1 else None
             save_prev = itile - 1 if itile else None
-            io_futures[itile + 1] = io_executor.submit(_io_handler, load=load_next,
-                                                       save=save_prev, load_model=load_model)
+            if load_next is not None or save_prev is not None:
+                io_futures[itile + 1] = io_executor.submit(_io_handler, load=load_next,
+                                                           save=save_prev, load_model=load_model)
 
             # submit solver jobs
             solver_futures = {}
@@ -405,13 +409,15 @@ def _io_handler(save=None, load=None, load_model=True, finalize=False):
             tile = tile_list[save]
             itile = range(len(tile_list))[save]
             print>>log(0, "blue"),"saving {}".format(tile.label)
-            tile.save(unlock=finalize)
+            tile.save(final=finalize)
             for sd in tile.iterate_solution_chunks():
                 solver.gm_factory.save_solutions(sd)
                 solver.ifrgain_machine.accumulate(sd)
             if finalize:
                 solver.ifrgain_machine.save()
+
                 solver.gm_factory.set_metas(tile.dh)
+
                 solver.gm_factory.close()
                 result['flagcounts'] = tile.dh.flagcounts
             tile.release()

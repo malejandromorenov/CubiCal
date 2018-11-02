@@ -149,7 +149,7 @@ class MSDataHandler:
     """ Main data handler. Interfaces with the measurement set. """
 
     def __init__(self, ms_name, data_column, output_column=None, output_model_column=None,
-                 reinit_output_column=False,
+                 output_weight_column=None, reinit_output_column=False,
                  taql=None, fid=None, ddid=None, channels=None,
                  flagopts={}, diag=False,
                  beam_pattern=None, beam_l_axis=None, beam_m_axis=None,
@@ -255,8 +255,17 @@ class MSDataHandler:
 
         antnames = _anttab.getcol("NAME")
         antpos = _anttab.getcol("POSITION")
+        # strip common prefix from antenna names to make short antenna names
+        minlength = min([len(name) for name in antnames])
+        prefix_length = 0
+        while prefix_length < minlength and len(set([name[:prefix_length+1] for name in antnames])) == 1:
+            prefix_length += 1
+
         self.metadata.antenna_name = antnames
-        self.metadata.baseline_name = { (p,q): "{}-{}".format(antnames[p], antnames[q])
+        self.metadata.antenna_name_short = antnames_short = [name[prefix_length:] for name in antnames]
+        self.metadata.antenna_name_prefix = antnames[0][:prefix_length]
+
+        self.metadata.baseline_name = { (p,q): "{}-{}".format(antnames[p], antnames_short[q])
                                         for p in xrange(self.nants) for q in xrange(p+1, self.nants)}
         self.metadata.baseline_length = { (p,q): math.sqrt(((antpos[p]-antpos[q])**2).sum())
                                         for p in xrange(self.nants) for q in xrange(p+1, self.nants)}
@@ -522,6 +531,7 @@ class MSDataHandler:
         self.data_column = data_column
         self.output_column = output_column
         self.output_model_column = output_model_column
+        self.output_weight_column = output_weight_column
         if reinit_output_column:
             reinit_columns = [col for col in [output_column, output_model_column]
                                if col and col in self.ms.colnames()]
@@ -530,6 +540,13 @@ class MSDataHandler:
                 self.ms.removecols(reinit_columns)
                 for col in reinit_columns:
                     self._add_column(col)
+                if output_weight_column is not None:
+                    print>>log(0),"reinitializing output weight column {}".format(output_weight_column)
+                    try:
+                        self.ms.removecols(output_weight_column) #Just remove column will be added later
+                    except:
+                        print>>log(0),"No output weight column {}, will just proceed".format(output_weight_column)
+
                 self.reopen()
 
         self._reinit_bitflags = flagopts["reinit-bitflags"]
@@ -556,7 +573,8 @@ class MSDataHandler:
                     if auto_init:
                         print>> log, ModColor.Str("WARNING: the BITFLAG column does not appear to be properly initialized. "
                             "This is perhaps due to a previous CubiCal run being interrupted while it was filling the column. "
-                            "This is not fatal, and we'll attempt to refill it.")
+                            "This is not fatal, but we'll attempt to refill it from the FLAG/FLAG_ROW column.")
+                        self._reinit_bitflags = True
                     elif see_no_evil:
                         print>> log, ModColor.Str("WARNING: the BITFLAG column does not appear to be properly initialized. "
                             "This is perhaps due to a previous CubiCal run being interrupted while it was filling the column. "
@@ -572,6 +590,7 @@ class MSDataHandler:
 
         self._apply_flags = self._apply_bitflags = self._save_bitflag = self._auto_fill_bitflag = None
         self._save_flags = bool(save_bitflag) if save_flags == "auto" else save_flags
+        self._save_flags_apply = save_flags == 'apply'
 
         # no BITFLAG. Should we auto-init it?
 
@@ -585,6 +604,7 @@ class MSDataHandler:
                 if type(auto_init) is not str:
                     raise ValueError("Illegal --flags-auto-init setting -- a flagset name such as 'legacy' must be specified")
                 self._auto_fill_bitflag = bitflags.flagmask(auto_init, create=True)
+                self._reinit_bitflags = True
                 print>> log, ModColor.Str("  Will auto-fill new BITFLAG '{}' ({}) from FLAG/FLAG_ROW".format(auto_init, self._auto_fill_bitflag), col="green")
                 self.ms.putcolkeyword("BITFLAG", "AUTOINIT_IN_PROGRESS", True)
             else:
@@ -634,12 +654,19 @@ class MSDataHandler:
             if save_bitflag:
                 self._save_bitflag = bitflags.flagmask(save_bitflag, create=True)
                 if self._save_flags:
-                    print>> log(0, "blue"), "  Will save output flags into BITFLAG '{}' ({}), and into FLAG/FLAG_ROW".format(save_bitflag, self._save_bitflag)
+                    if self._save_flags_apply:
+                        print>> log(0,"blue"), "  Will save output flags into BITFLAG '{}' ({}), and all flags (including input) FLAG/FLAG_ROW".format(
+                            save_bitflag, self._save_bitflag)
+                    else:
+                        print>> log(0,"blue"), "  Will save output flags into BITFLAG '{}' ({}), and into FLAG/FLAG_ROW".format(save_bitflag, self._save_bitflag)
                 else:
-                    print>> log(0, "red"), "  Will save output flags into BITFLAG '{}' ({}), but not into FLAG/FLAG_ROW".format(save_bitflag, self._save_bitflag)
+                    print>> log(0,"red"), "  Will save output flags into BITFLAG '{}' ({}), but not into FLAG/FLAG_ROW".format(save_bitflag, self._save_bitflag)
             else:
                 if self._save_flags:
-                    print>> log(0, "blue"), "  Will save output flags into into FLAG/FLAG_ROW"
+                    if self._save_flags_apply:
+                        print>> log(0, "blue"), "  Will save all flags (including input) into FLAG/FLAG_ROW"
+                    else:
+                        print>> log(0, "blue"), "  Will save output flags into FLAG/FLAG_ROW"
 
             for flagset in bitflags.names():
                 self.flagcounts[flagset] = 0
@@ -658,9 +685,10 @@ class MSDataHandler:
                 print>> log, ModColor.Str("  No flags will be read, since --flags-apply was not set")
             if self._save_flags:
                 print>> log(0, "blue"), "  Will save output flags into into FLAG/FLAG_ROW"
-
+            self._save_flags_apply = False   # no point in saving input flags, as nothing would change
             self.bitflags = {}
 
+        self.flagcounts['DESEL'] = 0
         self.flagcounts['IN'] = 0
         self.flagcounts['NEW'] = 0
         self.flagcounts['OUT'] = 0
@@ -1249,7 +1277,8 @@ class MSDataHandler:
 
     def finalize(self):
         if self._auto_fill_bitflag:
-            self.ms.removecolkeyword("BITFLAG", "AUTOINIT_IN_PROGRESS")
+            if "AUTOINIT_IN_PROGRESS" in self.ms.colkeywordnames("BITFLAG"):
+                self.ms.removecolkeyword("BITFLAG", "AUTOINIT_IN_PROGRESS")
         self.unlock()
 
     def unlock(self):

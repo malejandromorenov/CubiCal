@@ -174,7 +174,7 @@ def main(debugging=False):
                 import traceback
                 print>>log, ModColor.Str("Error initializing matplotlib: {}({})\n {}".format(type(exc).__name__,
                                                                                        exc, traceback.format_exc()))
-                raise UserInputError("matplotlib can't connect to X11. Can't use --out-plots show or --madmax-plots show.")
+                raise UserInputError("matplotlib can't connect to X11. Can't use --out-plots show or --madmax-plot show.")
         else:
             matplotlib.use("Agg")
 
@@ -225,6 +225,7 @@ def main(debugging=False):
                           GD["data"]["column"],
                           output_column=GD["out"]["column"],
                           output_model_column=GD["out"]["model-column"],
+                          output_weight_column=GD["out"]["weight-column"],
                           reinit_output_column=GD["out"]["reinit-column"],
                           taql=GD["sel"]["taql"],
                           fid=GD["sel"]["field"],
@@ -357,7 +358,9 @@ def main(debugging=False):
         # run the main loop
 
         t0 = time()
+
         stats_dict = workers.run_process_loop(ms, tile_list, load_model, single_chunk, solver_type, solver_opts, debug_opts)
+
 
         print>>log, ModColor.Str("Time taken for {}: {} seconds".format(solver_mode_name, time() - t0), col="green")
 

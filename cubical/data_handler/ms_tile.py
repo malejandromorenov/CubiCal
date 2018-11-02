@@ -312,7 +312,7 @@ class MSTile(object):
 
             corr_slice = slice(None) if self.ncorr == 4 else slice(None, None, 3)
 
-            col_selections = [[dirs, mods, rows, freqs, slice(None)][-col_ndim:]
+            col_selections = [tuple([dirs, mods, rows, freqs, slice(None)][-col_ndim:])
                               for dirs in xrange(dims["dirs"]) for mods in xrange(dims["mods"])]
 
             cub_selections = [[dirs, mods, tchunk, slice(None), achunk, bchunk, corr_slice][-(reqdims - 1):]
@@ -324,28 +324,28 @@ class MSTile(object):
             for col_selection, cub_selection in zip(col_selections, cub_selections):
 
                 if self.ncorr == 4:
-                    out_arr[cub_selection] = colsel = column[col_selection]
+                    out_arr[tuple(cub_selection)] = colsel = column[col_selection]
                     cub_selection[-3], cub_selection[-2] = cub_selection[-2], cub_selection[-3]
                     if np.iscomplexobj(out_arr):
-                        out_arr[cub_selection] = colsel.conj()[..., (0, 2, 1, 3)]
+                        out_arr[tuple(cub_selection)] = colsel.conj()[..., (0, 2, 1, 3)]
                     else:
-                        out_arr[cub_selection] = colsel[..., (0, 2, 1, 3)]
+                        out_arr[tuple(cub_selection)] = colsel[..., (0, 2, 1, 3)]
 
                 elif self.ncorr == 2:
-                    out_arr[cub_selection] = colsel = column[col_selection]
+                    out_arr[tuple(cub_selection)] = colsel = column[col_selection]
                     cub_selection[-3], cub_selection[-2] = cub_selection[-2], cub_selection[-3]
                     if np.iscomplexobj(out_arr):
-                        out_arr[cub_selection] = colsel.conj()
+                        out_arr[tuple(cub_selection)] = colsel.conj()
                     else:
-                        out_arr[cub_selection] = colsel
+                        out_arr[tuple(cub_selection)] = colsel
 
                 elif self.ncorr == 1:
-                    out_arr[cub_selection] = colsel = column[col_selection][..., (0, 0)]
+                    out_arr[tuple(cub_selection)] = colsel = column[col_selection][..., (0, 0)]
                     cub_selection[-3], cub_selection[-2] = cub_selection[-2], cub_selection[-3]
                     if np.iscomplexobj(out_arr):
-                        out_arr[cub_selection] = colsel.conj()
+                        out_arr[tuple(cub_selection)] = colsel.conj()
                     else:
-                        out_arr[cub_selection] = colsel
+                        out_arr[tuple(cub_selection)] = colsel
 
             # This zeros the diagonal elements in the "baseline" plane. This is purely a precaution -
             # we do not want autocorrelations on the diagonal.
@@ -579,7 +579,7 @@ class MSTile(object):
         # (Gotcha for shared_dict users! The only truly shared objects are arrays.
         # Thus, we create an array for the two "updated" variables.)
 
-        data0['updated'] = np.array([False, False])
+        data0['updated'] = np.array([False, False, False])
         self._auto_filled_bitflag = False
 
         # now run over the subsets of the tile set up above. Each subset is a chunk of rows with the same
@@ -642,7 +642,7 @@ class MSTile(object):
             self._flagcol_sum = 0
             self.dh.flagcounts["TOTAL"] += flag_arr0.size
 
-            if self.dh._apply_flags or self.dh._auto_fill_bitflag:
+            if self.dh._apply_flags or self.dh._auto_fill_bitflag or self.dh._reinit_bitflags:
                 flagcol = self.dh.fetchslice("FLAG", subset=table_subset)
                 flagrow = table_subset.getcol("FLAG_ROW")
                 flagcol[flagrow, :, :] = True
@@ -675,6 +675,7 @@ class MSTile(object):
             if num_inactive:
                 print>> log(0), "  {:.2%} visibilities deselected via specificed subset and/or baseline cutoffs".format(num_inactive / float(inactive.size))
                 flag_arr0[inactive] |= FL.SKIPSOL
+                self.dh.flagcounts["DESEL"] += num_inactive*flag_arr0[0].size
 
             # Form up bitflag array, if needed.
             if self.dh._apply_bitflags or self.dh._save_bitflag or self.dh._auto_fill_bitflag:
@@ -701,11 +702,12 @@ class MSTile(object):
                 if not read_bitflags:
                     self.bflagcol = np.zeros(flagcol.shape, np.int32)
                     self.bflagrow = np.zeros(flagrow.shape, np.int32)
-                    if self.dh._auto_fill_bitflag:
-                        self.bflagcol[flagcol] = self.dh._auto_fill_bitflag
-                        self.bflagrow[flagrow] = self.dh._auto_fill_bitflag
-                        print>> log, "  auto-filling BITFLAG/BITFLAG_ROW of shape %s" % str(self.bflagcol.shape)
-                        self._auto_filled_bitflag = True
+                # fill them from legacy flags, if auto-fill is enabled, or if we're reinitializing
+                if (not read_bitflags and self.dh._auto_fill_bitflag) or self.dh._reinit_bitflags:
+                    self.bflagcol[flagcol] = self.dh._auto_fill_bitflag
+                    self.bflagrow[flagrow] = self.dh._auto_fill_bitflag
+                    print>> log, "  auto-filling BITFLAG/BITFLAG_ROW of shape %s from FLAG/FLAG_ROW" % str(self.bflagcol.shape)
+                    self._auto_filled_bitflag = True
                 # compute stats
                 for flagset, bitmask in self.dh.bitflags.iteritems():
                     flagged = self.bflagcol & bitmask != 0
@@ -823,6 +825,10 @@ class MSTile(object):
 
             data.addSharedArray('covis', data['obvis'].shape, self.dh.ctype)
 
+            # Create a placeholder if using the Robust solver with save weights activated
+            if self.dh.output_weight_column is not None:
+                data.addSharedArray('outweights', data['obvis'].shape, self.dh.wtype)
+
         # Create a placeholder for the gain solutions
         data.addSubdict("solutions")
 
@@ -921,7 +927,7 @@ class MSTile(object):
 
         return obs_arr, mod_arr, flags, wgt_arr
 
-    def set_chunk_cubes(self, cube, flag_cube, key, column='covis'):
+    def set_chunk_cubes(self, cube, flag_cube, weight_cube, key, column='covis'):
         """
         Copies a visibility cube, and an optional flag cube, back to tile column.
 
@@ -930,6 +936,8 @@ class MSTile(object):
                 Cube containing visibilities.
             flag_cube (np.ndarray):
                 Cube containing flags.
+            weight_cube (np.ndarray):
+                Cube containing weights
             key (str):
                 The label corresponding to the chunk of interest.
             column (str, optional):
@@ -946,6 +954,9 @@ class MSTile(object):
         if flag_cube is not None:
             data['updated'][1] = True
             subset._cube_to_column(data['flags'], flag_cube, rows, freq_slice, flags=True)
+        if weight_cube is not None:
+           data['updated'][2] = True
+           subset._cube_to_column(data['outweights'], weight_cube, rows, freq_slice) 
 
     def create_solutions_chunk_dict(self, key):
         """
@@ -1012,6 +1023,8 @@ class MSTile(object):
                     added = self.dh._add_column(self.dh.output_column)
                 if self.dh.output_model_column and 'movis' in data:
                     added = added or self.dh._add_column(self.dh.output_model_column)
+                if self.dh.output_weight_column and data0['updated'][2]:
+                    added = self.dh._add_column(self.dh.output_weight_column, like_type='float')
                 if added:
                     self.dh.reopen()
                 added = True
@@ -1033,6 +1046,12 @@ class MSTile(object):
                 model = subset.upsample(model)
                 print>> log, "  writing {} column".format(self.dh.output_model_column)
                 self.dh.putslice(self.dh.output_model_column, model, subset=table_subset)
+
+            #writing outputs weights if any
+            if self.dh.output_weight_column and data0['updated'][2]:
+                outweights = subset.upsample(data['outweights'])
+                print>> log, "  writing {} weight column".format(self.dh.output_weight_column)
+                self.dh.putslice(self.dh.output_weight_column, outweights, subset=table_subset)
 
             # write flags if (a) solver has generated flags, and we're saving them, (b) always, if auto-filling BITFLAG column
             #
@@ -1072,6 +1091,15 @@ class MSTile(object):
                 print>> log, "  no new flags were generated"
                 if self._auto_filled_bitflag:
                     bflag_col = True
+
+            if self.dh._save_flags_apply:
+                prior_flags = subset.upsample((data['flags'] & FL.PRIOR) != 0)
+                if flag_col is None:
+                    flag_col = prior_flags
+                else:
+                    flag_col |= prior_flags
+                ratio = prior_flags.sum() / float(prior_flags.size)
+                print>> log, "  also transferring {:.2%} input flags (--flags-save-legacy apply)".format(ratio)
 
             # now figure out what to write
             # this is set if BITFLAG/BITFLAG_ROW is to be written out
